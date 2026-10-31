@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fbd44-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-31",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fbd44-users",
+      "database_id": "76eac5af-ddd7-4416-828a-e779d98b1e64"
+    }
+  ]
+}
