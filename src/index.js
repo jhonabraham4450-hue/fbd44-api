@@ -42,6 +42,33 @@ async function hashPassword(password, salt) {
     .join("");
 }
 
+async function ensureLoginTable(DB) {
+  await DB.prepare(`
+    CREATE TABLE IF NOT EXISTS login_logs (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      username TEXT,
+      identity TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      login_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+}
+
+function isAdmin(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  const token = auth.startsWith("Bearer ")
+    ? auth.slice(7)
+    : "";
+
+  return Boolean(
+    env.ADMIN_SECRET &&
+    token &&
+    token === env.ADMIN_SECRET
+  );
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -97,8 +124,17 @@ export default {
         const finalEmail = email || `${phone}@fbd44.local`;
 
         const existing = await env.DB.prepare(
-          "SELECT id FROM users WHERE lower(email) = lower(?) OR (? != '' AND phone = ?) LIMIT 1"
-        ).bind(finalEmail, phone, phone).first();
+          `SELECT id FROM users
+           WHERE lower(email) = lower(?)
+           OR (? != '' AND phone = ?)
+           OR lower(name) = lower(?)
+           LIMIT 1`
+        ).bind(
+          finalEmail,
+          phone,
+          phone,
+          name
+        ).first();
 
         if (existing) {
           return response({
@@ -135,7 +171,8 @@ export default {
             id,
             name,
             email: finalEmail,
-            phone
+            phone,
+            role: "user"
           }
         }, 201);
       }
@@ -165,7 +202,9 @@ export default {
           `SELECT id, name, email, phone,
           password_hash, password_salt, role
           FROM users
-          WHERE lower(email) = ? OR phone = ? OR lower(name) = ?
+          WHERE lower(email) = ?
+          OR phone = ?
+          OR lower(name) = ?
           LIMIT 1`
         ).bind(
           identity,
@@ -192,6 +231,22 @@ export default {
           }, 401);
         }
 
+        // Save successful login history
+        await ensureLoginTable(env.DB);
+
+        await env.DB.prepare(
+          `INSERT INTO login_logs
+          (id, user_id, username, identity, ip_address, user_agent)
+          VALUES (?, ?, ?, ?, ?, ?)`
+        ).bind(
+          crypto.randomUUID(),
+          user.id,
+          user.name,
+          identity,
+          request.headers.get("CF-Connecting-IP") || "Unknown",
+          request.headers.get("User-Agent") || "Unknown"
+        ).run();
+
         return response({
           success: true,
           message: "Login successful",
@@ -205,6 +260,54 @@ export default {
         });
       }
 
+      // ADMIN: REGISTERED USERS
+      if (path === "/api/admin/users" && request.method === "GET") {
+        if (!isAdmin(request, env)) {
+          return response({
+            success: false,
+            message: "Unauthorized admin access"
+          }, 401);
+        }
+
+        const result = await env.DB.prepare(
+          `SELECT id, name, email, phone, role
+           FROM users
+           ORDER BY rowid DESC`
+        ).all();
+
+        return response({
+          success: true,
+          total: result.results.length,
+          users: result.results
+        });
+      }
+
+      // ADMIN: LOGIN HISTORY
+      if (path === "/api/admin/logins" && request.method === "GET") {
+        if (!isAdmin(request, env)) {
+          return response({
+            success: false,
+            message: "Unauthorized admin access"
+          }, 401);
+        }
+
+        await ensureLoginTable(env.DB);
+
+        const result = await env.DB.prepare(
+          `SELECT id, user_id, username, identity,
+          ip_address, user_agent, login_at
+          FROM login_logs
+          ORDER BY login_at DESC
+          LIMIT 500`
+        ).all();
+
+        return response({
+          success: true,
+          total: result.results.length,
+          logins: result.results
+        });
+      }
+
       return response({
         success: false,
         message: "API route not found"
@@ -213,8 +316,7 @@ export default {
     } catch (error) {
       return response({
         success: false,
-        message: "Server error",
-        detail: error.message
+        message: "Server error"
       }, 500);
     }
   }
